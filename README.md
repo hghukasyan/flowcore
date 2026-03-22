@@ -1,42 +1,82 @@
+<div align="center">
+
 # Flowcore
 
-Flowcore is a small workflow library for Go. You describe steps, optional dependencies, retries, and compensations. The library runs them in order, runs independent steps in parallel, and keeps a simple in-memory record of what happened.
+### Workflows in Go — without the platform tax
 
-It fits inside your process. You do not need extra servers or a database to get started.
+**Compose steps. Add dependencies. Run in parallel. Retry, compensate, and stay idempotent — all inside your process.**
 
-Repository: [github.com/hghukasyan/flowcore](https://github.com/hghukasyan/flowcore)
+[![Go](https://img.shields.io/github/go-mod/go-version/hghukasyan/flowcore?logo=go&label=Go)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![PkgGoDev](https://pkg.go.dev/badge/github.com/hghukasyan/flowcore.svg)](https://pkg.go.dev/github.com/hghukasyan/flowcore)
 
-## Features
+[Repository](https://github.com/hghukasyan/flowcore) · [Examples](examples/) · [Contributing](CONTRIBUTING.md)
 
-- **Steps** — plain functions `func(ctx *flowcore.Context) error`
-- **Dependencies** — `DependsOn("other_step")` so steps wait for their prerequisites
-- **Parallel runs** — steps with no ordering constraint run at the same time
-- **Retries** — `Retry(n)` plus optional fixed or exponential backoff
-- **Timeouts** — `WithTimeout` per attempt
-- **Saga-style compensation** — `WithCompensation` runs in reverse order after a failure
-- **Sync and async** — `wf.Run(ctx)` or `engine.New().RunAsync(ctx, wf)`
-- **Hooks** — optional `Logger` for start / success / fail
-- **State** — in-memory store (workflow id, step status, retry count); swap later for Redis or SQL
-- **Idempotency keys** — skip duplicate successful runs for the same business id (payments, retried API calls) when the store supports it
+</div>
 
-**Standard library only.** No extra modules.
+---
+
+Flowcore is a **small, embeddable workflow library** for Go. You describe what should happen step by step; the library handles ordering, concurrency where it is safe, retries, saga-style rollbacks, and optional idempotency keys for real-world APIs and payments.
+
+No workers to deploy. No broker to babysit. **Standard library only** — zero third-party dependencies.
+
+> *“I want Temporal’s ideas — dependencies, sagas, retries — but I’m shipping a service or a batch job, not a second infrastructure stack.”*
+
+---
+
+## Why teams reach for Flowcore
+
+| You need… | Flowcore gives you… |
+|-----------|---------------------|
+| Clear multi-step flows in code | Named steps + `DependsOn` + automatic parallel layers |
+| Safer money or inventory paths | `WithCompensation` in **reverse** order on failure |
+| Production-ish resilience | Retries, fixed / exponential backoff, per-step timeouts |
+| Duplicate-safe HTTP or jobs | `IdempotencyKey` when your store supports it |
+| Something you can read in an afternoon | A compact codebase you can fork or extend |
+
+---
+
+## Features at a glance
+
+**Core**
+
+- Plain Go functions: `func(ctx *flowcore.Context) error`
+- Shared, thread-safe context for passing data between steps
+- Dependencies so steps wait for the right predecessors
+- Independent steps run **in parallel** automatically
+
+**Reliability**
+
+- Configurable retries + backoff
+- Saga-style **compensation** after failures
+- Optional **idempotency keys** for “run once per business id” semantics
+
+**Operations**
+
+- Sync `Run` or async `RunAsync` via the `engine` package
+- Lifecycle hooks with a small `Logger` interface
+- Pluggable `Store` (memory today; Redis / SQL on the roadmap)
+
+---
 
 ## Installation
+
+```bash
+go get github.com/hghukasyan/flowcore
+```
+
+Clone for examples and development:
 
 ```bash
 git clone https://github.com/hghukasyan/flowcore.git
 cd flowcore
 ```
 
-Add to your module:
+Import the root package for workflows; use `github.com/hghukasyan/flowcore/engine` and `.../store` when you need them.
 
-```bash
-go get github.com/hghukasyan/flowcore
-```
+---
 
-The main API is `package flowcore` at the module root, so you import `github.com/hghukasyan/flowcore` for workflows and `.../engine` or `.../store` for those subpackages.
-
-## Quick example
+## Quick start
 
 ```go
 package main
@@ -67,11 +107,17 @@ func main() {
 }
 ```
 
-`wf.Run` uses a default in-memory store and prints step lines to stdout. To turn off logs, use `flowcore.RunWithConfig(ctx, wf, flowcore.RunConfig{Logger: nil})` (and set `Store` if you want a custom store).
+`wf.Run` uses an in-memory store and prints step lifecycle lines. For silent runs:
 
-The same program lives in `examples/basic/basic.go`. Run it with `go run ./examples/basic` (Go needs one `main` package per folder, so examples use small subfolders).
+```go
+flowcore.RunWithConfig(ctx, wf, flowcore.RunConfig{Logger: nil})
+```
 
-## Advanced example (retry + compensation)
+Runnable copy: `examples/basic` → `go run ./examples/basic`
+
+---
+
+## Advanced: retries, backoff, compensation
 
 ```go
 package main
@@ -113,9 +159,31 @@ func main() {
 }
 ```
 
-See `examples/saga/saga.go` — run with `go run ./examples/saga`.
+Saga demo: `go run ./examples/saga`
 
-### Custom engine (own store, quiet logs)
+---
+
+## Idempotency (payments, webhooks, retried requests)
+
+```go
+wf := flowcore.New(flowcore.IdempotencyKey("order-" + orderID))
+```
+
+With the default **[store.Memory](store/memory.go)**:
+
+- After a **successful** run, another run with the same key returns **`nil`** and **does not** re-execute steps.
+- After a **failed** run, the key is released so you can **retry**.
+- Two overlapping runs: the second gets **`flowcore.ErrIdempotencyInProgress`** until the first finishes.
+
+Custom stores implement **[store.IdempotencyStore](store/idempotency.go)**. If you set a key but the store does not support it, `RunWithConfig` returns an error.
+
+**Heads-up:** a hard crash mid-run can leave a key stuck in “running” until you use a fresh store or add operational reset/TTL (not built in yet).
+
+Override per run: `RunConfig{ IdempotencyKey: "…" }`.
+
+---
+
+## Engine: custom store, quiet logs, async
 
 ```go
 import (
@@ -128,60 +196,47 @@ import (
 
 e := engine.New(
 	engine.WithStore(store.NewMemory()),
-	engine.WithLogger(nil), // no lifecycle logs
+	engine.WithLogger(nil),
 )
 err := e.Run(ctx, wf)
-```
 
-Async:
-
-```go
+// or
 errCh := e.RunAsync(ctx, wf)
-err := <-errCh
+err = <-errCh
 ```
 
-## Idempotency
+---
 
-```go
-wf := flowcore.New(flowcore.IdempotencyKey("order-" + orderID))
-```
+## Flowcore and Temporal
 
-With [store.Memory] (the default), a **second run** that uses the same key returns **nil** and does **not** execute steps again after the first run **succeeded**. If the first run **failed**, the key is cleared so you can retry.
+**Temporal** excels at long-lived, distributed workflows — and expects a cluster, workers, and operational maturity.
 
-Concurrent runs with the same key: the second call returns `flowcore.ErrIdempotencyInProgress` until the first finishes.
+**Flowcore** is intentionally narrow: **embeddable**, **readable**, **stdlib-only**. It shines for local sagas, batch pipelines, integration tests, and services where you want structure **without** running another platform. If you outgrow it, you can still migrate orchestration to a full engine later.
 
-Custom stores must implement `store.IdempotencyStore` (see `store/idempotency.go`). If you set a key but the store does not support it, `RunWithConfig` returns an error.
-
-A crash mid-run can leave the key stuck in the “running” state until you use a new store or add operational tooling (TTL/reset is not built in yet).
-
-## Why Flowcore (and not Temporal)?
-
-Temporal is powerful for long-lived, distributed workflows. It also needs a cluster, workers, and more moving parts.
-
-Flowcore is the opposite: a few hundred lines you embed in your app. Good for **local sagas**, **batch pipelines**, **integration tests**, or **small services** where you want structure without running another platform.
-
-If you outgrow it, you can still move workflows to a full engine later.
+---
 
 ## Project layout
 
-| Path        | Role                                      |
-|------------|-------------------------------------------|
-| repo root (`package flowcore`) | Workflow API, context, run, retries, saga |
-| `engine/`  | `Engine`, async run, `PlanParallel`       |
-| `store/`   | `Store` interface + memory backend        |
-| `examples/`| Runnable programs                         |
+| Location | What lives there |
+|----------|------------------|
+| Repo root (`package flowcore`) | Workflow API, execution, retries, saga, idempotency |
+| [`engine/`](engine/) | `Engine`, `RunAsync`, `PlanParallel` |
+| [`store/`](store/) | `Store`, in-memory backend, idempotency hooks |
+| [`examples/`](examples/) | Runnable programs |
+
+---
 
 ## Roadmap
 
-- Redis (or SQL) `Store` implementation
-- Optional distributed mode (lease + heartbeat), still keeping the API small
+- Redis or SQL `Store` implementation
+- Optional distributed mode (leases / heartbeat) without bloating the core API
 - Cron-style scheduled workflows
-- Richer metrics hooks (OpenTelemetry) without pulling heavy deps by default
+- Richer observability hooks (e.g. OpenTelemetry) as optional paths
 
-## License
+---
 
-This project is licensed under the MIT License — see [LICENSE](LICENSE).
+## License & community
 
-## Contributing
+Licensed under the [MIT License](LICENSE).
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
