@@ -162,3 +162,11 @@ If you outgrow it, you can still move workflows to a full engine later.
 - Optional distributed mode (lease + heartbeat), still keeping the API small
 - Cron-style scheduled workflows
 - Richer metrics hooks (OpenTelemetry) without pulling heavy deps by default
+
+## License
+
+This project is licensed under the MIT License — see [LICENSE](LICENSE).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
