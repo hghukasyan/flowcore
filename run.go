@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,9 @@ import (
 type RunConfig struct {
 	Store  store.Store
 	Logger Logger
+	// IdempotencyKey, if non-empty, enables run-level idempotency when the store implements
+	// [store.IdempotencyStore] (for example [store.Memory]). Overrides the workflow's key from [IdempotencyKey].
+	IdempotencyKey string
 }
 
 // DefaultRunConfig uses an in-memory store and [PrintLogger].
@@ -28,11 +32,11 @@ func DefaultRunConfig() RunConfig {
 }
 
 // RunWithConfig runs a workflow with explicit store and logger. Nil store defaults to memory; nil logger skips hooks.
-func RunWithConfig(ctx context.Context, w *Workflow, cfg RunConfig) error {
+func RunWithConfig(ctx context.Context, w *Workflow, cfg RunConfig) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := ctx.Err(); err != nil {
+	if err = ctx.Err(); err != nil {
 		return err
 	}
 	if cfg.Store == nil {
@@ -56,7 +60,29 @@ func RunWithConfig(ctx context.Context, w *Workflow, cfg RunConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := cfg.Store.PutWorkflow(ctx, wfID, names); err != nil {
+
+	key := strings.TrimSpace(cfg.IdempotencyKey)
+	if key == "" {
+		key = strings.TrimSpace(w.idempotencyKey)
+	}
+	if key != "" {
+		is, ok := cfg.Store.(store.IdempotencyStore)
+		if !ok {
+			return fmt.Errorf("flowcore: idempotency key set but store does not implement store.IdempotencyStore")
+		}
+		shouldRun, e := is.TryIdempotencyStart(ctx, key, wfID)
+		if e != nil {
+			return e
+		}
+		if !shouldRun {
+			return nil
+		}
+		defer func() {
+			_ = is.FinishIdempotency(context.WithoutCancel(ctx), key, err == nil)
+		}()
+	}
+
+	if err = cfg.Store.PutWorkflow(ctx, wfID, names); err != nil {
 		return err
 	}
 
@@ -93,7 +119,8 @@ func RunWithConfig(ctx context.Context, w *Workflow, cfg RunConfig) error {
 		cancel()
 		if runErr != nil {
 			runCompensations(ctx, wfID, wctx, cfg, succeeded, byName)
-			return runErr
+			err = runErr
+			return err
 		}
 	}
 	return nil

@@ -5,15 +5,77 @@ import (
 	"sync"
 )
 
+type idempState uint8
+
+const (
+	idempRunning idempState = iota
+	idempCompleted
+	idempFailed
+)
+
+type idempRecord struct {
+	state      idempState
+	workflowID string
+}
+
 // Memory is an in-memory Store for development and embedded use.
 type Memory struct {
-	mu    sync.RWMutex
-	flows map[string]*WorkflowState
+	mu     sync.RWMutex
+	flows  map[string]*WorkflowState
+	idemp  map[string]*idempRecord
 }
 
 // NewMemory returns a new empty memory store.
 func NewMemory() *Memory {
-	return &Memory{flows: make(map[string]*WorkflowState)}
+	return &Memory{
+		flows: make(map[string]*WorkflowState),
+		idemp: make(map[string]*idempRecord),
+	}
+}
+
+func (m *Memory) TryIdempotencyStart(ctx context.Context, key, workflowID string) (bool, error) {
+	_ = ctx
+	if key == "" {
+		return true, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.idemp[key]
+	if !ok {
+		m.idemp[key] = &idempRecord{state: idempRunning, workflowID: workflowID}
+		return true, nil
+	}
+	switch rec.state {
+	case idempCompleted:
+		return false, nil
+	case idempRunning:
+		return false, ErrIdempotencyInProgress
+	case idempFailed:
+		rec.state = idempRunning
+		rec.workflowID = workflowID
+		return true, nil
+	default:
+		return false, ErrIdempotencyInProgress
+	}
+}
+
+func (m *Memory) FinishIdempotency(ctx context.Context, key string, success bool) error {
+	_ = ctx
+	if key == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.idemp[key]
+	if !ok {
+		return nil
+	}
+	if success {
+		rec.state = idempCompleted
+	} else {
+		rec.state = idempFailed
+	}
+	return nil
 }
 
 func (m *Memory) PutWorkflow(ctx context.Context, id string, stepNames []string) error {

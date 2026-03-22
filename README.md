@@ -17,6 +17,7 @@ Repository: [github.com/hghukasyan/flowcore](https://github.com/hghukasyan/flowc
 - **Sync and async** — `wf.Run(ctx)` or `engine.New().RunAsync(ctx, wf)`
 - **Hooks** — optional `Logger` for start / success / fail
 - **State** — in-memory store (workflow id, step status, retry count); swap later for Redis or SQL
+- **Idempotency keys** — skip duplicate successful runs for the same business id (payments, retried API calls) when the store supports it
 
 **Standard library only.** No extra modules.
 
@@ -138,6 +139,20 @@ Async:
 errCh := e.RunAsync(ctx, wf)
 err := <-errCh
 ```
+
+## Idempotency
+
+```go
+wf := flowcore.New(flowcore.IdempotencyKey("order-" + orderID))
+```
+
+With [store.Memory] (the default), a **second run** that uses the same key returns **nil** and does **not** execute steps again after the first run **succeeded**. If the first run **failed**, the key is cleared so you can retry.
+
+Concurrent runs with the same key: the second call returns `flowcore.ErrIdempotencyInProgress` until the first finishes.
+
+Custom stores must implement `store.IdempotencyStore` (see `store/idempotency.go`). If you set a key but the store does not support it, `RunWithConfig` returns an error.
+
+A crash mid-run can leave the key stuck in the “running” state until you use a new store or add operational tooling (TTL/reset is not built in yet).
 
 ## Why Flowcore (and not Temporal)?
 

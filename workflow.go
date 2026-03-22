@@ -6,12 +6,17 @@ import (
 
 // Workflow is an ordered collection of steps with optional dependencies.
 type Workflow struct {
-	steps []*Step
+	steps          []*Step
+	idempotencyKey string
 }
 
-// New builds an empty workflow.
-func New() *Workflow {
-	return &Workflow{}
+// New builds an empty workflow. Pass [IdempotencyKey] and other options as needed.
+func New(opts ...WorkflowOption) *Workflow {
+	w := &Workflow{}
+	for _, o := range opts {
+		o(w)
+	}
+	return w
 }
 
 // Step registers a named step. Options configure retries, dependencies, timeouts, and compensation.
@@ -32,7 +37,11 @@ func (w *Workflow) Steps() []*Step {
 
 // Run executes the workflow with a default in-memory store and console logger.
 func (w *Workflow) Run(ctx context.Context) error {
-	return RunWithConfig(ctx, w, DefaultRunConfig())
+	cfg := DefaultRunConfig()
+	if w.idempotencyKey != "" {
+		cfg.IdempotencyKey = w.idempotencyKey
+	}
+	return RunWithConfig(ctx, w, cfg)
 }
 
 // ExecutionLayers returns batches of steps that may run concurrently; order between layers is sequential.
