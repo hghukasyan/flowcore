@@ -32,6 +32,9 @@ func RunWithConfig(ctx context.Context, w *Workflow, cfg RunConfig) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if cfg.Store == nil {
 		cfg.Store = store.NewMemory()
 	}
