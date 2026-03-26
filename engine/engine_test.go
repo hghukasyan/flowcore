@@ -5,8 +5,11 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/hghukasyan/flowcore"
 	"github.com/hghukasyan/flowcore/store"
+	"github.com/hghukasyan/flowcore/store/redis"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 func TestEngineRunSuccess(t *testing.T) {
@@ -66,5 +69,32 @@ func TestEngineWithStoreUsesInjectedBackend(t *testing.T) {
 	}
 	if spy.putWorkflowCalls != 1 {
 		t.Fatalf("PutWorkflow calls = %d", spy.putWorkflowCalls)
+	}
+}
+
+func TestEngineWithRedisStore(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { mr.Close() })
+	cl := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = cl.Close() })
+	st, err := redis.New(cl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(WithStore(st))
+	wf := flowcore.New()
+	var ran bool
+	wf.Step("a", func(*flowcore.Context) error {
+		ran = true
+		return nil
+	})
+	if err := e.Run(context.Background(), wf); err != nil {
+		t.Fatal(err)
+	}
+	if !ran {
+		t.Fatal("step did not run")
 	}
 }

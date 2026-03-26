@@ -18,7 +18,7 @@
 
 Flowcore is a **small, embeddable workflow library** for Go. You describe what should happen step by step; the library handles ordering, concurrency where it is safe, retries, saga-style rollbacks, and optional idempotency keys for real-world APIs and payments.
 
-No workers to deploy. No broker to babysit. **Standard library only** — zero third-party dependencies.
+No workers to deploy. No broker to babysit. The orchestration code you actually read is **mostly standard library**. If you want runs and idempotency keys to survive process restarts—or to share state across instances—you can plug in a **Redis**-backed store (we use the common Go client); more on that below.
 
 > *“I want Temporal’s ideas — dependencies, sagas, retries — but I’m shipping a service or a batch job, not a second infrastructure stack.”*
 
@@ -55,7 +55,7 @@ No workers to deploy. No broker to babysit. **Standard library only** — zero t
 
 - Sync `Run` or async `RunAsync` via the `engine` package
 - Lifecycle hooks with a small `Logger` interface
-- Pluggable `Store` (memory today; Redis / SQL on the roadmap)
+- Pluggable `Store`: in-memory for tests and local runs, **Redis** when you want shared or durable metadata
 
 ---
 
@@ -72,7 +72,7 @@ git clone https://github.com/hghukasyan/flowcore.git
 cd flowcore
 ```
 
-Import the root package for workflows; use `github.com/hghukasyan/flowcore/engine` and `.../store` when you need them.
+Import the root package for workflows; use `github.com/hghukasyan/flowcore/engine` and `.../store` when you need them. For Redis, add `github.com/hghukasyan/flowcore/store/redis` (and `github.com/redis/go-redis/v9` for the client).
 
 ---
 
@@ -181,6 +181,42 @@ Custom stores implement **[store.IdempotencyStore](store/idempotency.go)**. If y
 
 Override per run: `RunConfig{ IdempotencyKey: "…" }`.
 
+**Same rules with Redis:** a finished success still short-circuits the next trigger; a failed run still releases the key; overlapping runs still surface `store.ErrIdempotencyInProgress`. The difference is that state lives in Redis, so another instance (or a restart) sees the same truth—as long as everyone points at the same Redis and you treat persistence like you always do for Redis (AOF/RDB, failover, etc.).
+
+**Still a heads-up:** if the process dies after the key is marked `running` but before `FinishIdempotency` runs, you can still get stuck—same logical race as memory. With Redis you can at least inspect keys and delete or patch them; we don’t ship automatic lease expiry yet.
+
+---
+
+## Durable storage: Redis
+
+A lot of teams already run Redis for cache or queues. Flowcore’s [`store/redis`](store/redis/redis.go) package implements the same `Store` + `IdempotencyStore` contracts as [`store.Memory`](store/memory.go): workflow markers and per-step hashes for status, plus small Lua scripts so idempotency claims stay atomic under concurrency.
+
+You create a `go-redis` client the way you would for any other feature (TLS, cluster, ACL password—whatever you use today), then wrap it:
+
+```go
+import (
+	"github.com/hghukasyan/flowcore/engine"
+	redisstore "github.com/hghukasyan/flowcore/store/redis"
+	"github.com/redis/go-redis/v9"
+)
+
+rdb := redis.NewClient(&redis.Options{
+	Addr: "localhost:6379",
+})
+defer rdb.Close()
+
+st, err := redisstore.New(rdb)
+if err != nil {
+	panic(err)
+}
+
+e := engine.New(engine.WithStore(st))
+```
+
+Optional: `redisstore.New(rdb, redisstore.WithPrefix("myapp"))` if several services share one Redis and you want key separation.
+
+Idempotency keys are hashed (SHA-256) for the Redis key name so odd characters in your business id don’t break anything. Step snapshots still use the step names you register in Go.
+
 ---
 
 ## Engine: custom store, quiet logs, async
@@ -211,7 +247,7 @@ err = <-errCh
 
 **Temporal** excels at long-lived, distributed workflows — and expects a cluster, workers, and operational maturity.
 
-**Flowcore** is intentionally narrow: **embeddable**, **readable**, **stdlib-only**. It shines for local sagas, batch pipelines, integration tests, and services where you want structure **without** running another platform. If you outgrow it, you can still migrate orchestration to a full engine later.
+**Flowcore** is intentionally narrow: **embeddable**, **readable**, and small enough to reason about in one sitting. It shines for local sagas, batch pipelines, integration tests, and services where you want structure **without** running another platform. If you outgrow it, you can still migrate orchestration to a full engine later.
 
 ---
 
@@ -222,13 +258,13 @@ err = <-errCh
 | Repo root (`package flowcore`) | Workflow API, execution, retries, saga, idempotency |
 | [`engine/`](engine/) | `Engine`, `RunAsync`, `PlanParallel` |
 | [`store/`](store/) | `Store`, in-memory backend, idempotency hooks |
+| [`store/redis/`](store/redis/) | Redis `Store` + `IdempotencyStore` |
 | [`examples/`](examples/) | Runnable programs |
 
 ---
 
 ## Roadmap
 
-- Redis or SQL `Store` implementation
 - Optional distributed mode (leases / heartbeat) without bloating the core API
 - Cron-style scheduled workflows
 - Richer observability hooks (e.g. OpenTelemetry) as optional paths
